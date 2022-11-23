@@ -6,7 +6,7 @@ from torch import optim
 from typing import Any
 
 
-def MonteCarloReward(rewards: t.Tensor, crit: float, gamma: float = 0.99) -> t.Tensor:
+def monte_carlo_reward(rewards: t.Tensor, crit: float, gamma: float = 0.99) -> t.Tensor:
 
     returns = t.empty_like(rewards, requires_grad=False)
 
@@ -23,69 +23,67 @@ class ActorCritic(nn.Module):
     def __init__(self, inp_dim : int, out_dim : int) -> None:
         super().__init__()
         # Shared
-        self.linear1 = nn.Linear(inp_dim, 200)
-        self.linear2 = nn.Linear(200, 100)
+        self.linear1 = nn.Linear(inp_dim, 512)
         # Divergence 
-        self.actor = nn.Linear(100, out_dim)
-        self.critic = nn.Linear(100, 1)
+        self.actor = nn.Linear(512, out_dim)
+        self.critic = nn.Linear(512, 1)
 
     def forward(self, x : t.Tensor) -> tuple[t.Tensor, t.Tensor]:        
-        z = self.linear1(x)
-        z = self.linear2(z)
-        return self.actor(z), self.critic(z)
+        z = nn.functional.leaky_relu(self.linear1(x))
+        return nn.functional.softmax(self.actor(z), dim=0), self.critic(z)
 
 
 def a2c_train_loop(env : Any, episodes : int, max_steps : int = 1000, print_step : int = 100) -> None:
-    mdl = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0])
+    mdl = ActorCritic(env.observation_space.shape[0], env.action_space.n)
+    actor_loss_func = lambda action_probs, returns, crits : -t.sum(t.log(action_probs) * (returns - crits))
     critic_loss_func = nn.MSELoss("sum")
-    opti = optim.Adam(mdl.parameters())
-
-
+    opti = optim.Adam(mdl.parameters(), lr=0.0001)
+    
     for episode in range(episodes):
         state_t = t.from_numpy(env.reset()[0].astype(np.float32, copy=False)) 
         step = 0
         
         rewards = t.empty(max_steps)
         crits = t.empty(max_steps) # Must be here to reset graph
-        
+        action_probs = t.empty(max_steps)
         for _ in range(max_steps):
-            _, crit_t = mdl(state_t)
+            
+            action_prob, crit_t = mdl(state_t)
+            
+            action = t.distributions.categorical.Categorical(probs=action_prob).sample()
+            state_tt, reward_tt, terminated, _, _ = env.step(action.item())
 
-            #state, reward, terminated, _, _ = env.step(action.detach().numpy())
-            state_tt, reward_tt, terminated, _, _  = env.step(env.action_space.sample())
             state_tt = t.from_numpy(state_tt.astype(np.float32, copy=False))          
             crits[step] = crit_t
             rewards[step] = reward_tt
-
-            # policy update
-            # policy loss
-            # Update policy
+            action_probs[step] = action_prob[action]
 
             step += 1 
             state_t = state_tt
             if terminated:
                 break
 
-        _, crit_t = mdl(state_t)
-
-        returns = MonteCarloReward(rewards[:step], crit_t.item())
-         
-        opti.zero_grad()
-            
+        action_prob, crit_t = mdl(state_t)
+        
+        returns = monte_carlo_reward(rewards[:step], crit_t.item())
+        
+        actor_loss = actor_loss_func(action_probs[:step], returns, crits[:step]);    
         critic_loss = critic_loss_func(returns, crits[:step])
-        a2c_loss = critic_loss # + actor_loss
+        a2c_loss = critic_loss + actor_loss
        
-        # Might have to retain graph cuz of shared params
+        opti.zero_grad()
+        
         a2c_loss.backward()
+        
         opti.step()
 
-        #print(f"EPOCH: {epoch + 1}, STEP: {step + 1}, LOSS: {loss.item():.4f}")
+        print(f"EPISODE: {episode + 1}, STEPS: {step + 1}, [{action_prob[0].item():.2f},{action_prob[1].item():.2f}], CRIT LOSS: {critic_loss.item() / (step + 1):.4f}, ACT LOSS: {actor_loss.item() / (step + 1):.4f}")
         
 
 def main() -> None:
-    environment = gym.make("HalfCheetah-v4")
+    environment = gym.make("CartPole-v1")
 
-    a2c_train_loop(environment, 10)
+    a2c_train_loop(environment, 50000)
 
 if __name__ == "__main__":
     main()
