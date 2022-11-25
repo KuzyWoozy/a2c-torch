@@ -7,114 +7,162 @@ from typing import Any
 
 
 def monte_carlo_reward(rewards: t.Tensor, crit: float, gamma: float = 0.99) -> t.Tensor:
-
-    returns = t.zeros_like(rewards, requires_grad=False)
-    
-    # Override crit value, not true MC but more stable learning observed
-    crit = 0.0
+    returns = t.zeros_like(rewards)
     for i in reversed(range(len(rewards))):
         crit = rewards[i].item() + gamma * crit
         returns[i] = crit
-    
-    #returns = (returns - t.mean(returns)) / t.std(returns) 
-
     return returns
 
-class Actor(nn.Module):
 
+class ActorCritic(nn.Module):
     def __init__(self, inp_dim : int, out_dim : int) -> None:
         super().__init__()
+        self.inp_dim = inp_dim
+        self.out_dim = out_dim
+
         # Shared
-        self.linear1 = nn.Linear(inp_dim, 128)
-        self.linear2 = nn.Linear(128, 256)
+        self.linear1 = nn.Linear(inp_dim, 256)
+        self.linear2 = nn.Linear(256, 256)
 
         # Divergence 
         self.actor = nn.Linear(256, out_dim)
-
-    def forward(self, x : t.Tensor) -> tuple[t.Tensor, t.Tensor]:        
-        k = nn.functional.relu(self.linear1(x))
-        k = nn.functional.relu(self.linear2(k))
-        return nn.functional.softmax(self.actor(k), dim=0)
-
-
-class Critic(nn.Module):
-    def __init__(self, inp_dim : int) -> None:
-        super().__init__()
-
-        self.linear1 = nn.Linear(inp_dim, 128)
-        self.linear2 = nn.Linear(128, 256)
-
-        # Divergence 
         self.critic = nn.Linear(256, 1)
-    
+
+
     def forward(self, x : t.Tensor) -> tuple[t.Tensor, t.Tensor]:        
-        l = nn.functional.relu(self.linear1(x))
-        l = nn.functional.relu(self.linear2(l))
-        return self.critic(l)
+        self.z = nn.functional.relu(self.linear1(x))
+        self.z = nn.functional.relu(self.linear2(self.z))
+        
+        return nn.functional.log_softmax(self.actor(self.z), dim=0), self.critic(self.z)
 
 
+def a2c_train_loop(mdl : nn.Module, env : Any, episodes : int, max_steps : int = 1000) -> None:
 
-def a2c_train_loop(env : Any, episodes : int, max_steps : int = 1000, print_step : int = 100) -> None:
-    actor = Actor(env.observation_space.shape[0], env.action_space.n)
-    critic = Critic(env.observation_space.shape[0])
-    actor_loss_func = lambda action_probs, returns, crits : -t.mean(t.log(action_probs) * (returns - crits))
+    actor_loss_func = lambda action_logProbs, returns, crits : -t.mean(action_logProbs * (returns - crits))
     critic_loss_func = nn.MSELoss("mean")
 
-    opti_a = optim.Adam(actor.parameters())
-    opti_c = optim.Adam(critic.parameters())
-
+    opti = optim.Adam(mdl.parameters(), lr=0.00001)
+   
     for episode in range(episodes):
-        state_t = t.from_numpy(env.reset()[0].astype(np.float32, copy=False))       
-
+            
+        state_t, info = env.reset(seed=0)
+        state_t = t.tensor(list(env.decode(state_t))).float()
+        
         step = 0
         
         rewards = t.zeros(max_steps)
         crits = t.zeros(max_steps) # Must be here to reset graph
-        action_probs = t.empty(max_steps)
+        action_logProbs = t.empty(max_steps)
+        
         for _ in range(max_steps):
-            
-            action_prob = actor(state_t)
-            crit_t = critic(state_t)
-            
-            action = t.distributions.categorical.Categorical(probs=action_prob).sample()
+            in_taxi = state_t[2] == 4
 
-            state_tt, reward_tt, terminated, _, _ = env.step(action.item())
+            state_t[0] /= 5
+            state_t[1] /= 5
+            state_t[2] /= 5
+            state_t[3] /= 4
+            
+            action_logProb, crit_t = mdl(state_t)
+            
+            # Explore epsilon
+            if t.rand(1).item() < min(0.90, episode / (episodes / 2)):
+                action = t.distributions.categorical.Categorical(logits=action_logProb).sample()
+            else:
+                action = t.distributions.categorical.Categorical(probs=t.ones(1, mdl.out_dim)).sample()
+            
+            state_tt, reward_tt, terminated, _, info = env.step(action.item())
+            
+            state_tt = t.tensor(list(env.decode(state_tt))).float()
+            
+            if (t.equal(state_tt, state_t)): 
+                reward_tt = -5
+            
+            if (not in_taxi and state_tt[2] == 4):
+                reward_tt = 100
+           
+            reward_tt /= 100
 
-            state_tt = t.from_numpy(state_tt.astype(np.float32, copy=False))          
             crits[step] = crit_t
             rewards[step] = reward_tt
-            action_probs[step] = action_prob[action]
+            action_logProbs[step] = action_logProb[action]
 
             step += 1 
-            
             state_t = state_tt
+
+            if terminated:
+                break
+            
+            if (not in_taxi and state_tt[2] == 4):
+                break
+
+        _, crit_t = mdl(state_t)
+
+        returns = monte_carlo_reward(rewards[:step], crit_t.item())
+        actor_loss = actor_loss_func(action_logProbs[:step], returns, crits[:step].detach());    
+        critic_loss = critic_loss_func(returns, crits[:step])
+        a2c_loss = critic_loss + actor_loss
+       
+        opti.zero_grad()
+        
+        a2c_loss.backward()
+        
+        if (episode % 10 == 0):
+            param_sum = 0
+            param_cnt = 0
+            for param in mdl.parameters():
+                param_sum += t.sum(param.data)
+                param_cnt += t.prod(t.tensor([param.shape]))
+            
+            print(env.render())
+            print(f"EPISODE: {episode}, STEPS: {step}, {[x.item() for x in action_logProb]}, CRIT LOSS: {critic_loss.item():.4f}, ACT LOSS: {actor_loss.item():.4f}, PARAM AVG: {param_sum / param_cnt}")
+
+        opti.step()
+
+def play_game(mdl, env):
+    
+    while(True):
+        step = 0
+        
+        state_t, info = env.reset(seed=0)
+        #state_t = nn.functional.one_hot(t.tensor([state_t]), num_classes=env.observation_space.n)[0].float()
+        state_t = t.tensor(list(env.decode(state_t))).float()
+
+
+        while(True):
+            state_t[0] /= 5
+            state_t[1] /= 5
+            state_t[2] /= 5
+            state_t[3] /= 4
+            
+            action_logProb, _ = mdl(state_t) 
+
+            action = t.distributions.categorical.Categorical(logits=action_logProb).sample()
+
+            
+            state_t, reward_tt, terminated, _, _ = env.step(action.item())
+            state_t = t.tensor(list(env.decode(state_t))).float()
+
+
+            step += 1
+            print(step, action_logProb, t.argmax(action_logProb))
+
             if terminated:
                 break
 
-        
-        crit_t = critic(state_t)
-        
-        returns = monte_carlo_reward(rewards[:step], crit_t.item())
 
-        actor_loss = actor_loss_func(action_probs[:step], returns, crits[:step].detach());    
-        critic_loss = critic_loss_func(returns, crits[:step])
-       
-        opti_a.zero_grad()
-        opti_c.zero_grad()
-    
-        critic_loss.backward()
-        actor_loss.backward()
-        
-        opti_a.step()
-        opti_c.step()
-
-        if (episode % 100 == 0):
-            print(f"EPISODE: {episode}, STEPS: {step}, [{action_prob[0].item():.4f},{action_prob[1].item():.4f}], CRIT LOSS: {critic_loss.item():.4f}, ACT LOSS: {actor_loss.item():.4f}")
-    
 def main() -> None:
-    environment = gym.make("CartPole-v1")
+    environment = gym.make("Taxi-v3", render_mode="ansi")
+    
+    model = ActorCritic(4, environment.action_space.n)
+    
+    a2c_train_loop(model, environment, 2000, 500)
+    t.save(model, "model.torch")
 
-    a2c_train_loop(environment, 3000)
+    #model = t.load("model.torch")
+
+    environment = gym.make("Taxi-v3", render_mode="human")
+
+    play_game(model, environment)
 
     environment.close()
 
