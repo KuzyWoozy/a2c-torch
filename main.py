@@ -5,10 +5,10 @@ from torch import nn
 from torch import optim
 from typing import Any
 
-LEARNING_RATE = 3e-5 
-EPISODES = 1000
+LEARNING_RATE = 3e-4 
+EPISODES = 3000
 STEPS = 500
-ENTROPY = 0.001
+ENTROPY = 0.01
 
 class ActorCritic(nn.Module):
     def __init__(self, inp_dim, hidden_dim, out_dim):
