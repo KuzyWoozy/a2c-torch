@@ -5,10 +5,11 @@ from torch import nn
 from torch import optim
 from typing import Any
 
-LEARNING_RATE = 3e-4 
-EPISODES = 3000
+LEARNING_RATE = 3e-3 
+EPISODES = 10000
 STEPS = 500
-ENTROPY = 0.01
+ENTROPY = 0.0001
+
 
 class ActorCritic(nn.Module):
     def __init__(self, inp_dim, hidden_dim, out_dim):
@@ -33,9 +34,9 @@ class ActorCritic(nn.Module):
         
         dist = t.distributions.normal.Normal(t.zeros(self.out_dim), t.ones(self.out_dim))
 
-        action = (mean + std * dist.sample()).detach()
+        action = t.clip(mean + std * dist.sample(), -1, 1)
 
-        action_logProb = -((action - mean) ** 2) / (2 * std ** 2) - t.log(std) - t.log(t.sqrt(t.tensor([2 * t.pi])))
+        action_logProb = -((action - mean.detach()) ** 2) / (2 * std.detach() ** 2) - t.log(std.detach()) - t.log(t.sqrt(t.tensor([2 * t.pi])))
 
         return action, action_logProb, mean, std
 
@@ -78,7 +79,7 @@ def a2c_train_loop(mdl, env):
             
             action, action_logProb, mean, std, crit_t = mdl(state_t)
             
-            state_tt, reward_tt, terminated, truncated, info = env.step(t.clip(action, -1, 1).numpy())
+            state_tt, reward_tt, terminated, truncated, info = env.step(action.detach().numpy())
             
             crits.append(crit_t)
             rewards.append(reward_tt)
@@ -87,7 +88,7 @@ def a2c_train_loop(mdl, env):
 
             state_t = t.from_numpy(state_tt).float()
             
-            if terminated or truncated:
+            if terminated:
                 break
              
         rewards = t.tensor(rewards).unsqueeze(1)
@@ -111,18 +112,18 @@ def a2c_train_loop(mdl, env):
         opti.step()
         
         if (episode % 1 == 0):
-            print(f"EPISODE: {episode}, STEPS: {step}\n{action.detach().numpy()}\nCRIT LOSS: {critic_loss.item():.4f}, ACT LOSS: {actor_loss.item():.4f}, ENTROPY LOSS: {entropy_loss:.4f}\nMAX MEAN: {mean[t.argmax(t.abs(mean))]}, MAX STD: {t.max(std)}\n")
+            print(f"EPISODE: {episode}, STEPS: {step}\n{action.detach().numpy()}\nCRIT LOSS: {critic_loss.item():.4f}, ACT LOSS: {actor_loss.item():.4f}, ENTROPY LOSS: {entropy_loss:.4f}\nMEAN MAX: {mean[t.argmax(t.abs(mean))]}, MEAN AVG: {t.mean(mean)}, STD MAX: {t.max(std)}, STD AVG: {t.mean(std)}\n", flush=True) 
 
 
 
 def main() -> None:
     environment = gym.make("Ant-v4")
     
-    model = ActorCritic(environment.observation_space.shape[0], 256, environment.action_space.shape[0])
+    model = ActorCritic(environment.observation_space.shape[0], 100, environment.action_space.shape[0])
     
     a2c_train_loop(model, environment)
+    
     t.save(model, "model.torch")
-
     #model = t.load("model.torch")
 
     environment.close()
