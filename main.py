@@ -32,11 +32,9 @@ class ActorCritic(nn.Module):
         
         mean, std = t.tanh(self.actor_mean(z)), t.nn.functional.softplus(self.actor_std(z))
         
-        dist = t.distributions.normal.Normal(t.zeros(self.out_dim), t.ones(self.out_dim))
+        action = t.clip(t.distributions.normal.Normal(mean.detach(), std.detach()).sample(), -1, 1)
 
-        action = t.clip(mean + std * dist.sample(), -1, 1)
-
-        action_logProb = -((action - mean.detach()) ** 2) / (2 * std.detach() ** 2) - t.log(std.detach()) - t.log(t.sqrt(t.tensor([2 * t.pi])))
+        action_logProb = -((action - mean) ** 2) / (2 * std ** 2) - t.log(std) - t.log(t.sqrt(t.tensor([2 * t.pi])))
 
         return action, action_logProb, mean, std
 

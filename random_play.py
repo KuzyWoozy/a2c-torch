@@ -65,7 +65,7 @@ def play_loop(mdl, env):
 def main() -> None:
     environment = gym.make("Ant-v4", render_mode = "human")
     
-    model = t.load("model_50k.torch")
+    model = t.load("model.torch")
 
     play_loop(model, environment)
 
