@@ -73,18 +73,18 @@ def a2c_train_loop(mdl, env):
 
 
     opti = optim.Adam(mdl.parameters(), lr=LEARNING_RATE)
+
+
+    # Ensure correct broadcasting 
+    rewards = t.zeros(STEPS, 1, device=GPU, requires_grad=False)
+    crits = t.zeros(STEPS, 1, device=GPU)
+    action_logProbs = t.zeros(STEPS, mdl.out_dim, device=GPU)
+    stds = t.zeros(STEPS, mdl.out_dim, device=GPU)
    
     for episode in range(0, EPISODES):
             
         state_t = t.from_numpy(env.reset()[0]).float()
-        state_t = state_t.to(GPU)
-        
-
-        # Reset graph, ensure correct broadcasting 
-        rewards = t.zeros(STEPS, 1, device=GPU)
-        crits = t.zeros(STEPS, 1, device=GPU)
-        action_logProbs = t.zeros(STEPS, mdl.out_dim, device=GPU)
-        stds = t.zeros(STEPS, mdl.out_dim, device=GPU)
+        state_t = state_t.to(GPU)    
 
         for step in range(0, STEPS):
             
@@ -92,6 +92,7 @@ def a2c_train_loop(mdl, env):
             action = action.to(CPU)
 
             state_tt, reward_tt, terminated, truncated, info = env.step(action.numpy())
+            state_t = t.from_numpy(state_tt).float().to(GPU)
             
             # Undo forward reward
             forward_reward = info["reward_forward"]
@@ -106,20 +107,17 @@ def a2c_train_loop(mdl, env):
 
             if terminated:
                 break
-             
-            state_t = t.from_numpy(state_tt).float().to(GPU)
-        
-        rewards = rewards[:step + 1] 
-        crits = crits[:step + 1]
-        action_logProbs = action_logProbs[:step + 1] 
-        stds = stds[:step + 1]
-            
+       
+        rewards_v = rewards[:step + 1] 
+        crits_v = crits[:step + 1]
+        action_logProbs_v = action_logProbs[:step + 1] 
+        stds_v = stds[:step + 1]
 
-        returns = mcr(rewards)
-        advantage = returns - crits
-        actor_loss = t.sum(-action_logProbs * advantage.detach()) 
+        returns = mcr(rewards_v)
+        advantage = returns - crits_v
+        actor_loss = t.sum(-action_logProbs_v * advantage.detach()) 
         critic_loss = t.sum(advantage ** 2)
-        entropy_loss = t.sum(-ENTROPY * ((0.5 * t.log(2 * t.pi * stds ** 2)) + 0.5))
+        entropy_loss = t.sum(-ENTROPY * ((0.5 * t.log(2 * t.pi * stds_v ** 2)) + 0.5))
 
         a2c_loss = critic_loss + actor_loss + entropy_loss
 
@@ -127,7 +125,14 @@ def a2c_train_loop(mdl, env):
         a2c_loss.backward()
         opti.step()
         
-        if (episode % 10 == 0):
+        # Doesn't matter that we're detaching the view of the
+        # original array we don't interact with the other elements
+        crits = crits.detach()
+        action_logProbs = action_logProbs.detach()
+        stds = stds.detach()
+
+        
+        if (episode % 100 == 0):
             print(f"EPISODE: {episode}, STEPS: {step}\n{action.detach().numpy()}\nCRIT LOSS: {critic_loss.item():.4f}, ACT LOSS: {actor_loss.item():.4f}, ENTROPY LOSS: {entropy_loss:.4f}\nMEAN MAX: {mean[t.argmax(t.abs(mean))]}, MEAN AVG: {t.mean(mean)}, STD MAX: {t.max(std)}, STD AVG: {t.mean(std)}\n", flush=True) 
 
 
