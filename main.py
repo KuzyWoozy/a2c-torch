@@ -10,7 +10,7 @@ t.backends.cuda.matmul.allow_tf32 = True
 t.set_default_dtype(t.float32)
 
 LEARNING_RATE = 3e-3 
-EPISODES = 10000
+EPISODES = 200000
 STEPS = 500
 ENTROPY = 0.0001
 
@@ -40,13 +40,14 @@ class ActorCritic(nn.Module):
         mean, std = t.tanh(self.actor_mean(z)), t.nn.functional.softplus(self.actor_std(z))
         
         action = t.clip(t.distributions.normal.Normal(mean.detach(), std.detach()).sample(), -1, 1)
-
-        action_logProb = -((action - mean) ** 2) / (2 * std ** 2) - t.log(std) - t.log(t.sqrt(t.tensor([2 * t.pi])))
+       
+        action_logProb = -((action - mean) ** 2) / (2 * std ** 2) - t.log(std) - t.log(t.sqrt(t.tensor([2 * t.pi], device=GPU)))
 
         return action, action_logProb, mean, std
 
 
-    def forward(self, x : t.Tensor) -> tuple[t.Tensor, t.Tensor]:        
+    def forward(self, x):
+        
         z = nn.functional.relu(self.linear1(x))
         z = nn.functional.relu(self.linear2(z))
         
@@ -57,7 +58,7 @@ class ActorCritic(nn.Module):
 
 def a2c_train_loop(mdl, env):
     
-    def mcr(rewards: t.Tensor, gamma = 0.99):
+    def mcr(rewards, gamma = 0.99):
         returns = t.zeros_like(rewards, device=GPU)
         
         ret = 0
@@ -74,7 +75,8 @@ def a2c_train_loop(mdl, env):
     for episode in range(0, EPISODES):
             
         state_t = t.from_numpy(env.reset()[0]).float()
-        state_t.to(GPU)
+        state_t = state_t.to(GPU)
+        
 
         # Reset graph, ensure correct broadcasting 
         rewards = t.zeros(STEPS, 1, device=GPU)
@@ -85,7 +87,7 @@ def a2c_train_loop(mdl, env):
         for step in range(0, STEPS):
             
             action, action_logProb, mean, std, crit_t = mdl(state_t)    
-            action.to(CPU)
+            action = action.to(CPU)
 
             state_tt, reward_tt, terminated, truncated, info = env.step(action.numpy())
             
@@ -112,8 +114,6 @@ def a2c_train_loop(mdl, env):
         entropy_loss = t.sum(-ENTROPY * ((0.5 * t.log(2 * t.pi * stds ** 2)) + 0.5))
 
         a2c_loss = critic_loss + actor_loss + entropy_loss
-      
-        print(a2c_loss.device)
 
         opti.zero_grad()
         a2c_loss.backward()
@@ -128,9 +128,13 @@ def main() -> None:
     environment = gym.make("Ant-v4")
     
     model = ActorCritic(environment.observation_space.shape[0], 100, environment.action_space.shape[0])
-    model.to(GPU)
+    model = model.to(GPU)
     
+    start = time.time_ns()
     a2c_train_loop(model, environment)
+    end = time.time_ns()
+
+    print(f"Time taken: {(end - start) / 1e9}s")
     
     t.save(model, f"model-{round(time.time())}.torch")
     #model = t.load("model.torch")
