@@ -9,6 +9,8 @@ from torch import optim
 t.backends.cuda.matmul.allow_tf32 = True
 t.set_default_dtype(t.float32)
 
+ANT_SPEED = 0.2
+
 LEARNING_RATE = 3e-3 
 EPISODES = 200000
 STEPS = 500
@@ -90,6 +92,12 @@ def a2c_train_loop(mdl, env):
             action = action.to(CPU)
 
             state_tt, reward_tt, terminated, truncated, info = env.step(action.numpy())
+            
+            # Undo forward reward
+            forward_reward = info["reward_forward"]
+            reward_tt -= forward_reward
+            # Override reward, encourage walking at same speed
+            reward_tt += ANT_SPEED - forward_reward if forward_reward > ANT_SPEED else forward_reward 
             
             crits[step] = crit_t
             rewards[step] = reward_tt
